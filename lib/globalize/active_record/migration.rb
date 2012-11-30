@@ -9,8 +9,7 @@ module Globalize
         @globalize_migrator ||= Migrator.new(self)
       end
 
-      delegate :create_translation_table!, :add_translation_fields!, :drop_translation_table!,
-        :translation_index_name, :translation_locale_index_name,
+      delegate :create_translation_table!, :add_translation_fields!, :drop_translation_table!, :remove_translation_fields!, :translation_index_name, :translation_locale_index_name,
         :to => :globalize_migrator
 
       class Migrator
@@ -44,6 +43,21 @@ module Globalize
           clear_schema_cache!
           move_data_to_translation_table if options[:migrate_data]
           remove_source_columns if options[:remove_source_columns]
+          clear_schema_cache!
+        end
+
+        def remove_translation_fields!(fields, options = {})
+          @fields = fields
+          validate_translated_fields
+
+          if options[:migrate_data]
+            move_data_to_model_table
+          else
+            add_missing_columns
+            clear_schema_cache!
+          end
+
+          remove_translation_fields
           clear_schema_cache!
         end
 
@@ -86,6 +100,10 @@ module Globalize
           end
         end
 
+        def remove_translation_fields
+          connection.remove_columns(translations_table_name, *fields.keys)
+        end
+
         def create_translations_index
           connection.add_index(
             translations_table_name,
@@ -119,18 +137,18 @@ module Globalize
         end
 
         def move_data_to_model_table
+
           add_missing_columns
+          clear_schema_cache!
 
-          # Find all of the translated attributes for all records in the model.
-          all_translated_attributes = @model.all.collect{|m| m.attributes}
-          all_translated_attributes.each do |translated_record|
-            # Create a hash containing the translated column names and their values.
-            translated_attribute_names.inject(fields_to_update={}) do |f, name|
-              f.update({name.to_sym => translated_record[name.to_s]})
+          model.find_each do |record|
+            translation = record.translation_for(I18n.default_locale)
+            unless translation.nil?
+              fields.each do |attribute_name, attribute_type|
+                record[attribute_name] = translation[attribute_name]
+              end
             end
-
-            # Now, update the actual model's record with the hash.
-            @model.update_all(fields_to_update, {:id => translated_record['id']})
+            record.save!
           end
         end
 
@@ -176,7 +194,7 @@ module Globalize
         private
 
         def add_missing_columns
-          translated_attribute_names.map(&:to_s).each do |attribute|
+          fields.keys.map(&:to_s).each do |attribute|
             unless model.column_names.include?(attribute)
               connection.add_column(table_name, attribute, model::Translation.columns_hash[attribute].type)
             end
